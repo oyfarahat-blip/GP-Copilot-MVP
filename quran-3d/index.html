@@ -1,0 +1,341 @@
+<title>Bismillah in Light</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Amiri+Quran&family=Amiri:wght@400;700&family=Cormorant+Garamond:ital,wght@0,500;1,500&family=IBM+Plex+Mono:wght@400&display=swap">
+<style>
+  /* Layout: one full-bleed WebGL scene, a quiet caption band at the bottom, controls bottom-right. Single dark "night mushaf" look by choice. */
+  :root {
+    --ink: #07131c;        /* deep night teal-ink */
+    --ink-2: #0d2230;
+    --gold: #e2bd6b;       /* illumination gold */
+    --gold-soft: #b99a5a;
+    --parchment: #efe6d2;
+    --muted: #8fa3ad;
+    --font-ar: "Amiri Quran", "Amiri", "Scheherazade New", "Noto Naskh Arabic", serif;
+    --font-en: "Cormorant Garamond", "Iowan Old Style", Georgia, serif;
+    --font-ui: "IBM Plex Mono", ui-monospace, Menlo, monospace;
+    color-scheme: dark;
+  }
+  html, body { height: 100%; }
+  body {
+    background: radial-gradient(120% 90% at 50% 40%, var(--ink-2) 0%, var(--ink) 70%);
+    color: var(--parchment);
+    overflow: hidden;
+    font-family: var(--font-en);
+  }
+  #scene { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
+
+  .caption {
+    position: fixed; left: 0; right: 0;
+    bottom: calc(env(safe-area-inset-bottom, 0px) + 5.5rem);
+    padding-left: max(16px, env(safe-area-inset-left, 0px));
+    padding-right: max(16px, env(safe-area-inset-right, 0px));
+    text-align: center; pointer-events: none;
+    display: grid; gap: .5rem; justify-items: center;
+  }
+  .translation {
+    font-family: var(--font-en); font-style: italic; font-weight: 500;
+    font-size: clamp(1.15rem, 2.6vw, 1.9rem); line-height: 1.3;
+    max-width: 34ch; text-wrap: balance;
+    opacity: 0; transform: translateY(8px);
+    transition: opacity 1.4s ease, transform 1.4s ease;
+  }
+  .ref {
+    font-family: var(--font-ui); font-size: .72rem; letter-spacing: .22em;
+    text-transform: uppercase; color: var(--gold-soft);
+    opacity: 0; transition: opacity 1.4s ease .4s;
+  }
+  .caption.show .translation { opacity: 1; transform: none; }
+  .caption.show .ref { opacity: 1; }
+
+  .bar {
+    position: fixed; left: 0; right: 0;
+    bottom: 0;
+    padding-bottom: calc(env(safe-area-inset-bottom, 0px) + 1.25rem);
+    padding-left: max(16px, env(safe-area-inset-left, 0px));
+    padding-right: max(16px, env(safe-area-inset-right, 0px));
+    display: flex; align-items: center; justify-content: space-between; gap: 1rem; flex-wrap: wrap;
+  }
+  .label { font-family: var(--font-ui); font-size: .7rem; letter-spacing: .18em; text-transform: uppercase; color: var(--muted); }
+  .label b { color: var(--gold); font-weight: 400; }
+  .controls { display: flex; gap: .5rem; }
+  button {
+    font-family: var(--font-ui); font-size: .72rem; letter-spacing: .14em; text-transform: uppercase;
+    color: var(--parchment); background: rgba(226,189,107,.08);
+    border: 1px solid rgba(226,189,107,.35); border-radius: 2px;
+    padding: .55rem .9rem; cursor: pointer;
+  }
+  button:hover { background: rgba(226,189,107,.18); }
+  button:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; }
+  .progress { position: fixed; left: 0; top: 0; height: 2px; background: var(--gold); opacity: .55; width: 0; }
+  body.recording .bar, body.recording .progress { display: none; }
+  body.recording .translation, body.recording .ref { transition: none; }
+  @media (prefers-reduced-motion: reduce) { .translation, .ref { transition: none; } }
+</style>
+
+<canvas id="scene" aria-label="Animated 3D rendering of the verse Bismillah ir-Rahman ir-Rahim"></canvas>
+<div class="progress" id="progress"></div>
+
+<div class="caption" id="caption">
+  <div class="translation">In the name of Allah, the Most Gracious, the Most Merciful.</div>
+  <div class="ref">Sūrat al-Fātiḥah · 1:1</div>
+</div>
+
+<div class="bar">
+  <div class="label">Al-Fātiḥah <b>١</b> · Verse 1</div>
+  <div class="controls">
+    <button id="toggle" type="button">Pause</button>
+    <button id="replay" type="button">Replay</button>
+  </div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+(() => {
+  // Verse words in reading order (right to left on screen). Uthmani spelling.
+  const WORDS = [
+    { ar: "بِسْمِ",        en: "In the name" },
+    { ar: "ٱللَّهِ",       en: "of Allah" },
+    { ar: "ٱلرَّحْمَٰنِ",  en: "the Most Gracious" },
+    { ar: "ٱلرَّحِيمِ",    en: "the Most Merciful" },
+  ];
+  const LOOP = 22;           // seconds
+  const WORD_START = 2.6, WORD_STEP = 1.9;
+  const GOLD = new THREE.Color(0xe2bd6b);
+  const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  const canvas = document.getElementById("scene");
+  const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true, preserveDrawingBuffer: true });
+  renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+  const scene = new THREE.Scene();
+  scene.fog = new THREE.FogExp2(0x07131c, 0.018);
+  const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 400);
+
+  // ---------- Starfield ----------
+  const starGeo = new THREE.BufferGeometry();
+  const N_STARS = 2600, sp = new Float32Array(N_STARS * 3);
+  for (let i = 0; i < N_STARS; i++) {
+    const r = 40 + Math.random() * 140, th = Math.random() * Math.PI * 2, ph = Math.acos(2 * Math.random() - 1);
+    sp[i*3] = r * Math.sin(ph) * Math.cos(th); sp[i*3+1] = r * Math.sin(ph) * Math.sin(th); sp[i*3+2] = -Math.abs(r * Math.cos(ph)) - 10;
+  }
+  starGeo.setAttribute("position", new THREE.BufferAttribute(sp, 3));
+  const stars = new THREE.Points(starGeo, new THREE.PointsMaterial({ color: 0xcfd9df, size: 0.22, transparent: true, opacity: 0.7, depthWrite: false }));
+  scene.add(stars);
+
+  // ---------- Geometric star (8-point, two rotated squares) layers ----------
+  function starPolygon(R, r, points) {
+    const pts = [];
+    for (let i = 0; i <= points * 2; i++) {
+      const a = (i / (points * 2)) * Math.PI * 2 + Math.PI / 2;
+      const rad = i % 2 === 0 ? R : r;
+      pts.push(new THREE.Vector3(Math.cos(a) * rad, Math.sin(a) * rad, 0));
+    }
+    return new THREE.BufferGeometry().setFromPoints(pts);
+  }
+  function circle(R, seg = 128) {
+    const pts = [];
+    for (let i = 0; i <= seg; i++) { const a = i / seg * Math.PI * 2; pts.push(new THREE.Vector3(Math.cos(a) * R, Math.sin(a) * R, 0)); }
+    return new THREE.BufferGeometry().setFromPoints(pts);
+  }
+  const ornament = new THREE.Group();
+  const ornMats = [];
+  const layers = [
+    { g: starPolygon(9, 6.9, 8), z: -6, o: 0.55 },
+    { g: starPolygon(12.5, 9.6, 8), z: -9, o: 0.35 },
+    { g: starPolygon(16, 12.3, 16), z: -13, o: 0.22 },
+    { g: circle(10.2), z: -7, o: 0.3 },
+    { g: circle(17.5), z: -14, o: 0.16 },
+  ];
+  layers.forEach((L, i) => {
+    const m = new THREE.LineBasicMaterial({ color: GOLD, transparent: true, opacity: 0, depthWrite: false });
+    m.userData.max = L.o; ornMats.push(m);
+    const line = new THREE.Line(L.g, m); line.position.z = L.z; line.userData.spin = (i % 2 ? -1 : 1) * (0.03 + i * 0.012);
+    ornament.add(line);
+  });
+  // small rosette dots on the outer ring
+  const dotGeo = new THREE.BufferGeometry(); const dp = [];
+  for (let i = 0; i < 48; i++) { const a = i / 48 * Math.PI * 2; dp.push(Math.cos(a) * 17.5, Math.sin(a) * 17.5, -14); }
+  dotGeo.setAttribute("position", new THREE.Float32BufferAttribute(dp, 3));
+  const dotMat = new THREE.PointsMaterial({ color: GOLD, size: 0.35, transparent: true, opacity: 0, depthWrite: false });
+  dotMat.userData.max = 0.6; ornMats.push(dotMat);
+  ornament.add(new THREE.Points(dotGeo, dotMat));
+  scene.add(ornament);
+
+  // ---------- Word construction ----------
+  const PX = 100; // canvas px per world unit
+  const verse = new THREE.Group(); scene.add(verse);
+  let words = [];
+
+  function textCanvas(text, font, fill, { glow = 0, pad = 60, dir = "rtl" } = {}) {
+    const c = document.createElement("canvas"), x = c.getContext("2d");
+    x.font = font; x.direction = dir;
+    const m = x.measureText(text);
+    const asc = m.actualBoundingBoxAscent || 120, desc = m.actualBoundingBoxDescent || 60;
+    c.width = Math.ceil(m.width + pad * 2);
+    c.height = Math.ceil(asc + desc + pad * 2);
+    x.font = font; x.direction = dir; x.textAlign = "center"; x.textBaseline = "alphabetic";
+    if (glow) { x.shadowColor = fill; x.shadowBlur = glow; }
+    x.fillStyle = fill;
+    x.fillText(text, c.width / 2, pad + asc);
+    return { c, w: m.width };
+  }
+
+  function sample(c, step) {
+    const x = c.getContext("2d"), d = x.getImageData(0, 0, c.width, c.height).data, pts = [];
+    for (let y = 0; y < c.height; y += step) for (let xx = 0; xx < c.width; xx += step) {
+      if (d[(y * c.width + xx) * 4 + 3] > 140) pts.push([(xx - c.width / 2) / PX, (c.height / 2 - y) / PX]);
+    }
+    return pts;
+  }
+
+  function planeFrom(c, opacity = 0) {
+    const tex = new THREE.CanvasTexture(c); tex.minFilter = THREE.LinearFilter; tex.anisotropy = 4;
+    const mat = new THREE.MeshBasicMaterial({ map: tex, transparent: true, opacity, depthWrite: false });
+    return new THREE.Mesh(new THREE.PlaneGeometry(c.width / PX, c.height / PX), mat);
+  }
+
+  function build() {
+    words.forEach(w => verse.remove(w.group));
+    words = [];
+    const AR_FONT = `160px ${getComputedStyle(document.documentElement).getPropertyValue("--font-ar")}`;
+    const EN_FONT = `italic 500 46px ${getComputedStyle(document.documentElement).getPropertyValue("--font-en")}`;
+    const gap = 0.55;
+    const made = WORDS.map(W => {
+      const crisp = textCanvas(W.ar, AR_FONT, "#f4ead2");
+      const glow = textCanvas(W.ar, AR_FONT, "#e2bd6b", { glow: 38 });
+      const gloss = textCanvas(W.en, EN_FONT, "#b99a5a", { dir: "ltr", pad: 20 });
+      return { W, crisp, glow, gloss, width: crisp.w / PX };
+    });
+    const total = made.reduce((s, m) => s + m.width, 0) + gap * (made.length - 1);
+    let cursor = total / 2; // reading starts on the right
+    made.forEach((m, i) => {
+      const cx = cursor - m.width / 2; cursor -= m.width + gap;
+      const group = new THREE.Group(); group.position.x = cx;
+      const glowMesh = planeFrom(m.glow.c); glowMesh.material.blending = THREE.AdditiveBlending; glowMesh.position.z = -0.05;
+      const crispMesh = planeFrom(m.crisp.c);
+      const glossMesh = planeFrom(m.gloss.c); glossMesh.position.y = -1.75; glossMesh.scale.setScalar(0.9);
+      group.add(glowMesh, crispMesh, glossMesh);
+
+      // particles that gather into the word
+      const target = sample(m.crisp.c, 3);
+      const n = target.length, pos = new Float32Array(n * 3), from = new Float32Array(n * 3), to = new Float32Array(n * 3), delay = new Float32Array(n);
+      for (let k = 0; k < n; k++) {
+        const r = 6 + Math.random() * 14, a = Math.random() * Math.PI * 2;
+        from[k*3] = Math.cos(a) * r; from[k*3+1] = Math.sin(a) * r * 0.6; from[k*3+2] = -20 - Math.random() * 30;
+        to[k*3] = target[k][0]; to[k*3+1] = target[k][1]; to[k*3+2] = (Math.random() - 0.5) * 0.25;
+        delay[k] = Math.random() * 0.45;
+      }
+      const pg = new THREE.BufferGeometry(); pg.setAttribute("position", new THREE.BufferAttribute(pos, 3));
+      const pm = new THREE.PointsMaterial({ color: GOLD, size: 0.06, transparent: true, opacity: 0, blending: THREE.AdditiveBlending, depthWrite: false });
+      const pts = new THREE.Points(pg, pm); group.add(pts);
+
+      verse.add(group);
+      words.push({ group, glowMesh, crispMesh, glossMesh, pts, from, to, delay, n, start: WORD_START + i * WORD_STEP });
+    });
+    verse.userData.total = total;
+    resize();
+  }
+
+  // ---------- Timeline ----------
+  const ease = t => t < 0 ? 0 : t > 1 ? 1 : 1 - Math.pow(1 - t, 3);
+  const inOut = t => t < 0 ? 0 : t > 1 ? 1 : t * t * (3 - 2 * t);
+  const caption = document.getElementById("caption");
+  const progress = document.getElementById("progress");
+
+  function frame(t) {
+    const outro = inOut((t - 18.6) / 2.6);           // global dissolve
+    const fadeAll = 1 - outro;
+
+    // ornament draws in, spins slowly
+    const ornIn = inOut(t / 2.4) * fadeAll;
+    ornMats.forEach(m => m.opacity = m.userData.max * ornIn);
+    ornament.children.forEach(c => { if (c.userData.spin) c.rotation.z = t * c.userData.spin; });
+    ornament.scale.setScalar(0.85 + 0.15 * inOut(t / 3) + outro * 0.25);
+
+    words.forEach(w => {
+      const lt = t - w.start;
+      const gather = 1.7;
+      const p = w.pts.geometry.attributes.position.array;
+      for (let k = 0; k < w.n; k++) {
+        const e = ease((lt - w.delay[k]) / gather);
+        const i3 = k * 3;
+        // swirl on approach
+        const sw = (1 - e) * 2.2;
+        const x = w.from[i3] + (w.to[i3] - w.from[i3]) * e;
+        const y = w.from[i3+1] + (w.to[i3+1] - w.from[i3+1]) * e;
+        p[i3]   = x * Math.cos(sw) - y * Math.sin(sw) * 0.3 + outro * (w.to[i3] * 0.6 + (k % 7 - 3) * 0.9);
+        p[i3+1] = y + Math.sin(sw) * x * 0.15 + outro * ((k % 5) - 2) * 1.1 + outro * 2;
+        p[i3+2] = w.from[i3+2] + (w.to[i3+2] - w.from[i3+2]) * e + outro * ((k % 11) - 5) * 1.5;
+      }
+      w.pts.geometry.attributes.position.needsUpdate = true;
+
+      const arrived = inOut((lt - 1.2) / 0.9);
+      w.pts.material.opacity = (lt > 0 ? Math.min(1, lt * 2) : 0) * (1 - arrived * 0.82) * (1 - outro * 0.3) * (t > 21.4 ? 0 : 1);
+      w.pts.material.size = 0.06 + outro * 0.05;
+      w.crispMesh.material.opacity = arrived * fadeAll;
+      // glow pulses once on arrival, then breathes
+      const flare = Math.exp(-Math.pow((lt - 1.6) / 0.5, 2));
+      w.glowMesh.material.opacity = (arrived * (0.35 + 0.1 * Math.sin(t * 1.6 + w.start)) + flare * 0.6) * fadeAll;
+      w.glossMesh.material.opacity = inOut((lt - 1.8) / 1.0) * fadeAll * 0.95;
+      w.group.position.z = (1 - ease(lt / 2.2)) * -3 + outro * 1.5;
+    });
+
+    if (window.__manual) {
+      const o = inOut((t - 11.2) / 1.4) * (1 - inOut((t - 18.8) / 1.4));
+      caption.style.opacity = o; caption.classList.add("show");
+    } else {
+      caption.classList.toggle("show", t > 11.2 && t < 18.8);
+    }
+
+    // camera: slow drift, gentle parallax
+    const drift = reduced ? 0 : 1;
+    camera.position.x = Math.sin(t * 0.21) * 2.2 * drift;
+    camera.position.y = 0.6 + Math.sin(t * 0.17) * 0.8 * drift;
+    camera.position.z = camera.userData.dist + (1 - inOut(t / 6)) * 6 * drift;
+    camera.lookAt(0, 0.2, -2);
+    stars.rotation.z = t * 0.006;
+    progress.style.width = (t / LOOP * 100) + "%";
+  }
+
+  function resize() {
+    const w = innerWidth, h = innerHeight;
+    renderer.setSize(w, h, false);
+    camera.aspect = w / h; camera.updateProjectionMatrix();
+    // fit the verse width into ~86% of the view at z=0
+    const total = verse.userData.total || 16;
+    const fitW = total * 1.18 + 1;
+    const vFov = camera.fov * Math.PI / 180;
+    const distForWidth = (fitW / 2) / (Math.tan(vFov / 2) * camera.aspect);
+    camera.userData.dist = Math.max(14, distForWidth);
+    verse.position.y = camera.aspect < 0.9 ? 0.9 : 0.6;
+  }
+  addEventListener("resize", resize);
+
+  // ---------- Playback ----------
+  let playing = true, t = reduced ? 14 : 0, last = performance.now();
+  const toggle = document.getElementById("toggle");
+  toggle.onclick = () => { playing = !playing; toggle.textContent = playing ? "Pause" : "Play"; last = performance.now(); };
+  document.getElementById("replay").onclick = () => { t = 0; playing = true; toggle.textContent = "Pause"; };
+
+  // external hook for deterministic frame capture
+  window.__renderAt = (time) => { frame(time); renderer.render(scene, camera); };
+  window.__loop = LOOP;
+
+  function tick(now) {
+    const dt = Math.min(0.05, (now - last) / 1000); last = now;
+    if (playing && !window.__manual) { t += dt; if (t >= LOOP) t = 0; }
+    if (!window.__manual) { frame(t); renderer.render(scene, camera); }
+    requestAnimationFrame(tick);
+  }
+
+  const fontsReady = Promise.all([
+    document.fonts.load('160px "Amiri Quran"', "بِسْمِ ٱللَّهِ"),
+    document.fonts.load('160px "Amiri"', "بِسْمِ ٱللَّهِ"),
+    document.fonts.load('italic 500 46px "Cormorant Garamond"', "In the name"),
+  ]).catch(() => {});
+  Promise.race([fontsReady, new Promise(r => setTimeout(r, 2500))]).then(() => {
+    build(); window.__ready = true; requestAnimationFrame(tick);
+  });
+})();
+</script>
